@@ -49,6 +49,7 @@ export interface AssignSeatPayload {
   buyer_id: string;
   buyer_email: string;
   actor: string;
+  duration_days?: number;
 }
 
 export interface ReplaceSeatPayload {

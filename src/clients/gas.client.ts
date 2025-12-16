@@ -256,6 +256,8 @@ class GasClient {
       throw new Error('seat assignment allowed only when order status = PENDING_SEND');
     }
 
+    const durationDays = Number(payload.duration_days ?? orderCtx.product.duration_days ?? 0);
+
     // existing seat?
     const seatTable = await this.getSeatsTable();
     const idxOrder = seatTable.headers.indexOf('order_id');
@@ -303,14 +305,14 @@ class GasClient {
         const pick = releasedSeats[0];
         const rowNumber = pick.idx + 2;
         const nowIso = this.isoNow();
-      const endDate = this.addDays(new Date(), Number(orderCtx.product.duration_days || 0)).toISOString();
-      await this.updateRow(SHEET.SEATS, rowNumber, seatTable.headers, {
-        status: SEAT_STATUS.RESERVED,
-        order_id: payload.order_id,
-        buyer_id: payload.buyer_id,
-        buyer_email: payload.buyer_email,
-        start_date: nowIso,
-        end_date: endDate,
+        const endDate = this.addDays(new Date(), durationDays).toISOString();
+        await this.updateRow(SHEET.SEATS, rowNumber, seatTable.headers, {
+          status: SEAT_STATUS.RESERVED,
+          order_id: payload.order_id,
+          buyer_id: payload.buyer_id,
+          buyer_email: payload.buyer_email,
+          start_date: nowIso,
+          end_date: endDate,
           released_at: '',
         });
         await this.log('SEAT_ASSIGNED', payload.actor, payload.order_id, `reuse seat ${pick.row[idxSeatId]}`);
@@ -346,7 +348,7 @@ class GasClient {
     const accountId = account[accIdxId];
     const seatId = `SEAT-${randomUUID()}`;
     const nowIso = this.isoNow();
-    const endDate = this.addDays(new Date(), Number(orderCtx.product.duration_days || 0)).toISOString();
+    const endDate = this.addDays(new Date(), durationDays).toISOString();
 
     await this.appendRow(SHEET.SEATS, seatTable.headers, {
       seat_id: seatId,

@@ -3,7 +3,7 @@ export const encodeCallbackData = (action: string, payload: Record<string, strin
     .map(([k, v]) => `${k}:${v}`)
     .join('|');
   const raw = entries ? `${action}|${entries}` : action;
-  if (raw.length > 60) {
+  if (raw.length > 64) {
     throw new Error('Callback data too long');
   }
   return raw;

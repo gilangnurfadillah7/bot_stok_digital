@@ -38,11 +38,11 @@ const startDailyExpireSweep = () => {
           inline_keyboard: seats.map((s) => [
             {
               text: `${s.buyer_id} - ${s.end_date}`,
-              callback_data: encodeCallbackData('RENEW_CONFIRM', { seat_id: s.seat_id }),
+              callback_data: encodeCallbackData('RENEW_CONFIRM', { sid: s.seat_id }),
             },
             {
               text: 'Do Not Renew',
-              callback_data: encodeCallbackData('RENEW_SKIP', { seat_id: s.seat_id }),
+              callback_data: encodeCallbackData('RENEW_SKIP', { sid: s.seat_id }),
             },
           ]),
         };

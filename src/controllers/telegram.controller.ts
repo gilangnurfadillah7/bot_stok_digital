@@ -173,6 +173,7 @@ const listRecentActiveOrders = async (limit = 10) => sheetsService.listRecentAct
 const handlePendingInput = async (message: TelegramMessage, adminUsername: string) => {
   const pending = pendingInputs.get(message.chat.id);
   if (!pending || !message.text) return false;
+  let shouldClearPending = true;
 
   if (pending.action === 'NEW_ORDER_BUYER') {
     try {
@@ -181,6 +182,7 @@ const handlePendingInput = async (message: TelegramMessage, adminUsername: strin
       const productId = pending.meta.product_id;
       const platform = pending.meta.platform;
       const channel = pending.meta.channel || 'Telegram';
+      const durationDays = pending.meta.duration_days ? Number(pending.meta.duration_days) : undefined;
 
       const { seat, orderId } = await orderService.createAndAssignSeat({
         product_id: productId,
@@ -189,6 +191,7 @@ const handlePendingInput = async (message: TelegramMessage, adminUsername: strin
         buyer_id,
         buyer_email,
         actor: adminUsername,
+        duration_days: durationDays,
       });
 
       const expire = seat.end_date ? new Date(seat.end_date).toLocaleDateString('id-ID') : '-';
@@ -201,11 +204,11 @@ const handlePendingInput = async (message: TelegramMessage, adminUsername: strin
           reply_markup: {
             inline_keyboard: [
               [
-                { text: '✅ Tandai Sudah Dikirim', callback_data: encodeCallbackData('ORDER_SENT', { order_id: orderId }) },
-                { text: '🔄 Ganti Akun', callback_data: encodeCallbackData('ORDER_REPLACE', { seat_id: seat.seat_id }) },
+                { text: '✅ Tandai Sudah Dikirim', callback_data: encodeCallbackData('ORDER_SENT', { oid: orderId }) },
+                { text: '🔄 Ganti Akun', callback_data: encodeCallbackData('ORDER_REPLACE', { sid: seat.seat_id }) },
               ],
               [
-                { text: '❌ Batalkan Order', callback_data: encodeCallbackData('ORDER_CANCEL', { order_id: orderId }) },
+                { text: '❌ Batalkan Order', callback_data: encodeCallbackData('ORDER_CANCEL', { oid: orderId }) },
                 { text: '⬅️ Kembali', callback_data: encodeCallbackData('HOME') },
               ],
             ],
@@ -214,10 +217,19 @@ const handlePendingInput = async (message: TelegramMessage, adminUsername: strin
       );
     } catch (err: any) {
       console.error('Order create error', err);
-      await telegramClient.sendMessage(
-        message.chat.id,
-        `❌ Order gagal diproses.\n${err?.message || 'Silakan coba lagi atau cek stok akun.'}`
-      );
+      const msg = (err?.message || '').toString();
+      if (msg === 'NEED_NEW_ACCOUNT') {
+        await telegramClient.sendMessage(
+          message.chat.id,
+          '❌ Stok akun untuk produk ini habis. Silakan Restok dulu lalu ulangi Order Baru.',
+          { reply_markup: backOrCancel('HOME') }
+        );
+      } else {
+        await telegramClient.sendMessage(
+          message.chat.id,
+          `❌ Order gagal diproses.\n${msg || 'Silakan coba lagi atau cek stok akun.'}`
+        );
+      }
     }
   }
 
@@ -266,11 +278,14 @@ const handlePendingInput = async (message: TelegramMessage, adminUsername: strin
           message.chat.id,
           `Ditambahkan ${lines.length} baris. Ketik /selesai jika sudah selesai input.`
         );
+        shouldClearPending = false;
       }
     }
   }
 
-  pendingInputs.delete(message.chat.id);
+  if (shouldClearPending) {
+    pendingInputs.delete(message.chat.id);
+  }
   return true;
 };
 
@@ -283,8 +298,8 @@ const handleCallback = async (callback: CallbackQuery, adminUsername: string, is
 
   switch (action) {
     case 'HOME':
-      pendingInputs.clear();
-      restockBuffers.clear();
+      pendingInputs.delete(chatId);
+      restockBuffers.delete(chatId);
       await sendHome(chatId, isOwner);
       break;
     case 'ORDER_NEW': {
@@ -323,16 +338,16 @@ const handleCallback = async (callback: CallbackQuery, adminUsername: string, is
       break;
     }
     case 'ORDER_SENT': {
-      await orderService.markOrderSent(payload.order_id, adminUsername);
+      await orderService.markOrderSent(payload.oid, adminUsername);
       await telegramClient.answerCallbackQuery(callback.id, 'Order ditandai terkirim');
       break;
     }
     case 'ORDER_REPLACE': {
-      if (!payload.seat_id) {
+      if (!payload.sid) {
         await telegramClient.answerCallbackQuery(callback.id, 'Seat tidak diketahui', true);
         break;
       }
-      const seat = await seatService.replaceSeatWithReason(payload.seat_id, adminUsername, 'replace_request');
+      const seat = await seatService.replaceSeatWithReason(payload.sid, adminUsername, 'replace_request');
       await telegramClient.sendMessage(
         chatId,
         `✅ Akun pengganti siap\nSeat: ${seat.seat_id}\nAkun: ${seat.account_id}\nExpire: ${seat.end_date}`
@@ -340,12 +355,30 @@ const handleCallback = async (callback: CallbackQuery, adminUsername: string, is
       break;
     }
     case 'ORDER_CANCEL': {
-      pendingInputs.set(chatId, { action: 'CANCEL_REASON', meta: { order_id: payload.order_id } });
+      pendingInputs.set(chatId, { action: 'CANCEL_REASON', meta: { order_id: payload.oid } });
       await telegramClient.sendMessage(chatId, 'Masukkan alasan cancel/refund:', { force_reply: true });
       break;
     }
     case 'INVITE': {
       await telegramClient.sendMessage(chatId, 'Gunakan menu Order Baru untuk kirim/invite akun.');
+      break;
+    }
+    case 'CANCEL': {
+      const orders = await listRecentActiveOrders(10);
+      if (!orders.length) {
+        await telegramClient.sendMessage(chatId, 'Tidak ada order aktif untuk dibatalkan.');
+        break;
+      }
+      const rows: InlineKeyboardMarkup['inline_keyboard'] = orders.map((o) => [
+        {
+          text: `${o.product_id} - ${o.buyer_id}`,
+          callback_data: encodeCallbackData('CANCEL_PICK', { oid: o.order_id }),
+        },
+      ]);
+      rows.push(...backOrCancel('HOME').inline_keyboard);
+      await telegramClient.sendMessage(chatId, 'Pilih order untuk cancel/refund:', {
+        reply_markup: { inline_keyboard: rows },
+      });
       break;
     }
     case 'PROBLEM': {
@@ -366,31 +399,55 @@ const handleCallback = async (callback: CallbackQuery, adminUsername: string, is
         await telegramClient.sendMessage(chatId, 'Tidak ada order aktif.');
         break;
       }
-      const rows: InlineKeyboardMarkup['inline_keyboard'] = orders.map((o) => [
-        {
-          text: `${o.product_id} - ${o.buyer_id}`,
-          callback_data: encodeCallbackData('PROBLEM_PICK', { ...payload, order_id: o.order_id, seat_id: o.seat_id }),
-        },
-      ]);
+      const rows: InlineKeyboardMarkup['inline_keyboard'] = orders.map((o) => {
+        if (payload.t === 'cancel') {
+          return [
+            {
+              text: `${o.product_id} - ${o.buyer_id}`,
+              callback_data: encodeCallbackData('CANCEL_PICK', { oid: o.order_id }),
+            },
+          ];
+        }
+        if (payload.t === 'replace') {
+          return [
+            {
+              text: `${o.product_id} - ${o.buyer_id}`,
+              callback_data: encodeCallbackData('PROB_REPL', { sid: o.seat_id }),
+            },
+          ];
+        }
+        return [
+          {
+            text: `${o.product_id} - ${o.buyer_id}`,
+            callback_data: encodeCallbackData('PROB_NOTE', { oid: o.order_id }),
+          },
+        ];
+      });
       rows.push(...backOrCancel('HOME').inline_keyboard);
       await telegramClient.sendMessage(chatId, 'Pilih order yang bermasalah:', {
         reply_markup: { inline_keyboard: rows },
       });
       break;
     }
-    case 'PROBLEM_PICK': {
-      if (payload.t === 'cancel') {
-        pendingInputs.set(chatId, { action: 'CANCEL_REASON', meta: { order_id: payload.order_id } });
-        await telegramClient.sendMessage(chatId, 'Masukkan alasan cancel/refund:', { force_reply: true });
-      } else if (payload.t === 'replace') {
-        const seat = await seatService.replaceSeatWithReason(payload.seat_id, adminUsername, 'problem_replace');
-        await telegramClient.sendMessage(
-          chatId,
-          `✅ Akun pengganti siap\nSeat: ${seat.seat_id}\nAkun: ${seat.account_id}\nExpire: ${seat.end_date}`
-        );
-      } else {
-        await telegramClient.sendMessage(chatId, 'Catat masalah. Silakan ganti atau cancel sesuai kebutuhan.');
+    case 'PROB_REPL': {
+      if (!payload.sid) {
+        await telegramClient.answerCallbackQuery(callback.id, 'Seat tidak diketahui', true);
+        break;
       }
+      const seat = await seatService.replaceSeatWithReason(payload.sid, adminUsername, 'problem_replace');
+      await telegramClient.sendMessage(
+        chatId,
+        `✅ Akun pengganti siap\nSeat: ${seat.seat_id}\nAkun: ${seat.account_id}\nExpire: ${seat.end_date}`
+      );
+      break;
+    }
+    case 'PROB_NOTE': {
+      await telegramClient.sendMessage(chatId, 'Catat masalah. Silakan ganti atau cancel sesuai kebutuhan.');
+      break;
+    }
+    case 'CANCEL_PICK': {
+      pendingInputs.set(chatId, { action: 'CANCEL_REASON', meta: { order_id: payload.oid } });
+      await telegramClient.sendMessage(chatId, 'Masukkan alasan cancel/refund:', { force_reply: true });
       break;
     }
     case 'EXPIRING': {
@@ -403,7 +460,7 @@ const handleCallback = async (callback: CallbackQuery, adminUsername: string, is
         inline_keyboard: seats.map((s, i) => [
           {
             text: `${i + 1}. ${s.buyer_id} (${s.end_date})`,
-            callback_data: encodeCallbackData('EXP_PICK', { seat_id: s.seat_id }),
+            callback_data: encodeCallbackData('EXP_PICK', { sid: s.seat_id }),
           },
         ]),
       };
@@ -414,8 +471,8 @@ const handleCallback = async (callback: CallbackQuery, adminUsername: string, is
     case 'EXP_PICK': {
       const keyboard: InlineKeyboardMarkup = {
         inline_keyboard: [
-          [{ text: '✅ Perpanjang', callback_data: encodeCallbackData('RENEW_CONFIRM', { seat_id: payload.seat_id }) }],
-          [{ text: '❌ Tidak Perpanjang', callback_data: encodeCallbackData('RENEW_SKIP', { seat_id: payload.seat_id }) }],
+          [{ text: '✅ Perpanjang', callback_data: encodeCallbackData('RENEW_CONFIRM', { sid: payload.sid }) }],
+          [{ text: '❌ Tidak Perpanjang', callback_data: encodeCallbackData('RENEW_SKIP', { sid: payload.sid }) }],
           [{ text: '⏰ Tunda', callback_data: encodeCallbackData('HOME') }],
         ],
       };
@@ -423,12 +480,12 @@ const handleCallback = async (callback: CallbackQuery, adminUsername: string, is
       break;
     }
     case 'RENEW_CONFIRM': {
-      await seatService.confirmRenew(payload.seat_id, adminUsername);
+      await seatService.confirmRenew(payload.sid, adminUsername);
       await telegramClient.answerCallbackQuery(callback.id, 'Diperpanjang');
       break;
     }
     case 'RENEW_SKIP': {
-      await seatService.skipRenew(payload.seat_id, adminUsername);
+      await seatService.skipRenew(payload.sid, adminUsername);
       await telegramClient.answerCallbackQuery(callback.id, 'Ditandai tidak perpanjang');
       break;
     }
@@ -476,6 +533,12 @@ const handleCallback = async (callback: CallbackQuery, adminUsername: string, is
       const buffer = restockBuffers.get(chatId);
       if (!buffer) {
         await telegramClient.answerCallbackQuery(callback.id, 'Tidak ada data restok', true);
+        break;
+      }
+      if (!buffer.lines.length) {
+        await telegramClient.answerCallbackQuery(callback.id, 'Semua input duplikat / kosong', true);
+        restockBuffers.delete(chatId);
+        pendingInputs.delete(chatId);
         break;
       }
       const accounts = buffer.lines.map((line) => ({

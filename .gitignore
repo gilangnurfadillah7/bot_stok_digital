@@ -4,3 +4,5 @@ node_modules/
 dist/
 node.out
 node.err
+tools/
+qa_report.md

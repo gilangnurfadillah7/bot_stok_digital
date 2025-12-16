@@ -6,3 +6,5 @@ node.out
 node.err
 tools/
 qa_report.md
+kerjaan_manus/
+set_webhook.ps1

@@ -9,13 +9,13 @@ class SeatService {
     return gasClient.listExpiringSeats(iso);
   }
 
-  async confirmRenew(seatId: string, actor: string) {
+  async confirmRenew(seatId: string, actor: string): Promise<any> {
     const seat = await gasClient.confirmRenew(seatId, actor);
     await gasClient.log('SEAT_RENEW', actor, seatId);
     return seat;
   }
 
-  async skipRenew(seatId: string, actor: string) {
+  async skipRenew(seatId: string, actor: string): Promise<any> {
     const seat = await gasClient.skipRenew(seatId, actor);
     await gasClient.log('SEAT_SKIP_RENEW', actor, seatId);
     return seat;
@@ -27,7 +27,7 @@ class SeatService {
     return seat;
   }
 
-  async replaceSeatWithReason(seatId: string, actor: string, reason: string) {
+  async replaceSeatWithReason(seatId: string, actor: string, reason: string): Promise<any> {
     return sheetsService.replaceSeatWithReason(seatId, actor, reason);
   }
 }

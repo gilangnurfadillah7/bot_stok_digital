@@ -196,7 +196,6 @@ const handlePendingInput = async (message: TelegramMessage, adminUsername: strin
       const productId = pending.meta.product_id;
       const platform = pending.meta.platform;
       const channel = pending.meta.channel || 'Telegram';
-      const durationDays = pending.meta.duration_days ? Number(pending.meta.duration_days) : undefined;
 
       const { seat, orderId } = await orderService.createAndAssignSeat({
         product_id: productId,
@@ -205,7 +204,6 @@ const handlePendingInput = async (message: TelegramMessage, adminUsername: strin
         buyer_id,
         buyer_email,
         actor: adminUsername,
-        duration_days: durationDays,
       });
 
       const expire = seat.end_date ? new Date(seat.end_date).toLocaleDateString('id-ID') : '-';
@@ -322,6 +320,20 @@ const handleCallback = async (callback: CallbackQuery, adminUsername: string, is
 
   const { action, payload } = decodeCallbackData(callback.data);
 
+  // Stale Button Check: Prevent re-triggering actions from old keyboards
+  const isStale = (action: string) => {
+    const staleActions = ['ORDER_CH', 'ORDER_PICK', 'ORDER_DURATION', 'PROBLEM_TYPE', 'EXP_PICK'];
+    return staleActions.includes(action);
+  };
+
+  if (isStale(action)) {
+    // Acknowledge the query to prevent Telegram from showing "Loading..." indefinitely
+    await telegramClient.answerCallbackQuery(callback.id, 'Aksi sudah kadaluarsa atau tidak valid.', true);
+    // Optionally, edit the message to remove the keyboard
+    await editMessageReplyMarkup(chatId, messageId, { inline_keyboard: [] });
+    return;
+  }
+
   switch (action) {
     case 'HOME':
       // State Isolation Fix: Use delete(chatId) instead of global clear()
@@ -432,31 +444,6 @@ const handleCallback = async (callback: CallbackQuery, adminUsername: string, is
     }
     case 'INVITE': {
       await telegramClient.sendMessage(chatId, 'Gunakan menu Order Baru untuk kirim/invite akun.');
-      break;
-    }
-    case 'CANCEL': {
-      await editMessageReplyMarkup(chatId, messageId, { inline_keyboard: [] });
-      const orders = await listRecentActiveOrders(10);
-      if (!orders.length) {
-        await telegramClient.sendMessage(chatId, 'Tidak ada order aktif untuk dibatalkan.');
-        break;
-      }
-      const rows: InlineKeyboardMarkup['inline_keyboard'] = orders.map((o) => [
-        {
-          text: `${o.product_id} - ${o.buyer_id}`,
-          callback_data: encodeCallbackData('CANCEL_PICK', { order_id: o.order_id }),
-        },
-      ]);
-      rows.push(...backOrCancel('HOME').inline_keyboard);
-      await telegramClient.sendMessage(chatId, 'Pilih order untuk cancel/refund:', {
-        reply_markup: { inline_keyboard: rows },
-      });
-      break;
-    }
-    case 'CANCEL_PICK': {
-      await editMessageReplyMarkup(chatId, messageId, { inline_keyboard: [] });
-      pendingInputs.set(chatId, { action: 'CANCEL_REASON', meta: { order_id: payload.order_id } });
-      await telegramClient.sendMessage(chatId, 'Masukkan alasan cancel/refund:', { force_reply: true });
       break;
     }
     case 'PROBLEM': {

@@ -36,8 +36,8 @@ class OrderService {
     await gasClient.log('ORDER_CANCEL', actor, orderId, reason);
   }
 
-  async markOrderSent(orderId: string, actor: string) {
-    await gasClient.markOrderSent(orderId, actor);
+  async markOrderSent(orderId: string, actor: string): Promise<any> {
+    return gasClient.markOrderSent(orderId, actor);
   }
 }
 

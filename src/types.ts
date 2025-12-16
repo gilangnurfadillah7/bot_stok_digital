@@ -41,6 +41,9 @@ export interface Seat {
   end_date: string;
   status: SeatStatus;
   released_at?: string;
+  already_replaced?: boolean;
+  already_renewed?: boolean;
+  already_skipped?: boolean;
 }
 
 export interface AssignSeatPayload {
@@ -118,3 +121,24 @@ export interface RestockAccountInput {
   expired_at?: string;
   status?: string;
 }
+
+// Minimal account result shape returned from restock operations
+export type AccountResult = {
+  account_id: string;
+};
+
+// Telegram update shape used by the controller
+export type TelegramUpdate = {
+  message?: {
+    message_id: number;
+    chat: { id: number };
+    text?: string;
+    from?: { id: number; username?: string; first_name: string; last_name?: string };
+  };
+  callback_query?: {
+    id: string;
+    from: { id: number; username?: string; first_name: string; last_name?: string };
+    data?: string;
+    message?: { message_id: number; chat: { id: number } };
+  };
+};

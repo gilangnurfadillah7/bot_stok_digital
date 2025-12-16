@@ -1,0 +1,4 @@
+export const sheetsService = {
+    listRecentActiveOrders: async (limit: number) => ([{ order_id: 'O1', seat_id: 'S1', product_id: 'P1', buyer_id: 'buyer1' }]),
+    listAccountIdentities: async (platform: string) => (new Set(['existing_acc@test.com'])),
+};

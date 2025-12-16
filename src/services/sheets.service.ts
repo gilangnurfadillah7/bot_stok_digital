@@ -14,6 +14,11 @@ class SheetsService {
     return gasClient.listAccountIdentities(platform);
   }
 
+  // Used for in-memory deduping in the controller; no-op for real client.
+  addAccountIdentity(_account: string) {
+    // Intentionally left blank. The real source of truth is Google Sheets.
+  }
+
   async replaceSeatWithReason(seat_id: string, actor: string, reason: string): Promise<Seat> {
     const seat = await gasClient.replaceSeat({
       seat_id,

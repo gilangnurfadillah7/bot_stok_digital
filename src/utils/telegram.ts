@@ -61,6 +61,14 @@ class TelegramClient {
     });
   }
 
+  editMessageReplyMarkup(chatId: number | string, messageId: number, replyMarkup: InlineKeyboardMarkup) {
+    return this.request('editMessageReplyMarkup', {
+      chat_id: chatId,
+      message_id: messageId,
+      reply_markup: replyMarkup,
+    });
+  }
+
   answerCallbackQuery(callbackQueryId: string, text?: string, showAlert = false) {
     return this.request('answerCallbackQuery', {
       callback_query_id: callbackQueryId,

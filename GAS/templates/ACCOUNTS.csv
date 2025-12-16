@@ -1,0 +1,2 @@
+account_id,platform,mode,email,max_slot,status,expired_at,created_at
+ACC-1,netflix,sharing,acc1@mail.com,5,active,,2024-12-16T00:00:00Z

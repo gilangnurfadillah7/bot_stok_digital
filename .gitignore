@@ -1,0 +1,6 @@
+﻿.env
+.seccc/
+node_modules/
+dist/
+node.out
+node.err

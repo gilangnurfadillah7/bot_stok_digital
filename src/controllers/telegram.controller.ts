@@ -34,6 +34,17 @@ type CallbackQuery = {
 type TelegramUpdate = TUpdate;
 
 const pendingInputs = new Map<number, PendingInput>();
+const adminProductBuffers = new Map<
+  number,
+  {
+    platform?: string;
+    seat_mode?: 'PRIVATE' | 'SHARING' | 'HEAD';
+    duration_days?: number;
+    product_name?: string;
+    sharing_max_slot?: number;
+    fallback_policy?: 'STRICT' | 'FALLBACK_PRIVATE_UNUSED_TO_SHARING';
+  }
+>();
 const restockBuffers = new Map<number, { product: Product; lines: string[]; expire_at?: string }>();
 const RESTOCK_MAX_LINES = 30;
 
@@ -163,6 +174,16 @@ akun1@gmail.com|pass
 akun2@gmail.com
 
 Ketik /selesai jika sudah selesai input.`;
+const restockPromptHead = `Masukkan daftar akun (1 baris = 1 akun) - maks ${RESTOCK_MAX_LINES} akun per restok
+
+Bebas format:
+- email/identity (tanpa password/pin)
+
+Contoh:
+akun1@gmail.com
+akun2@gmail.com
+
+Ketik /selesai jika sudah selesai input.`;
 const restockExpirePrompt =
   'Pilih masa berlaku akun untuk stok ini:\n- 30 hari\n- 1 tahun\n- Custom (isi hari)\nAtau pilih kosong jika tanpa tanggal.';
 
@@ -184,7 +205,7 @@ const restockExpireKeyboard = () => ({
     [{ text: '30 hari', callback_data: encodeCallbackData('RESTOCK_EXPIRE_PRESET', { d: '30' }) }],
     [{ text: '1 tahun', callback_data: encodeCallbackData('RESTOCK_EXPIRE_PRESET', { d: '365' }) }],
     [{ text: 'Custom (isi hari)', callback_data: encodeCallbackData('RESTOCK_EXPIRE_CUSTOM') }],
-    [{ text: 'Kosongkan', callback_data: encodeCallbackData('RESTOCK_EXPIRE_PRESET', { d: '0' }) }],
+    [{ text: 'Tanpa masa berlaku', callback_data: encodeCallbackData('RESTOCK_EXPIRE_PRESET', { d: '0' }) }],
     ...backOrCancel('HOME').inline_keyboard,
   ],
 });
@@ -193,6 +214,79 @@ const expireDateFromDays = (days: number) => {
   const d = new Date();
   d.setDate(d.getDate() + days);
   return d.toISOString().slice(0, 10);
+};
+
+const adminModeKeyboard = () => ({
+  inline_keyboard: [
+    [
+      { text: 'PRIVATE', callback_data: encodeCallbackData('ADMIN_MODE_PICK', { m: 'PRIVATE' }) },
+      { text: 'SHARING', callback_data: encodeCallbackData('ADMIN_MODE_PICK', { m: 'SHARING' }) },
+      { text: 'HEAD', callback_data: encodeCallbackData('ADMIN_MODE_PICK', { m: 'HEAD' }) },
+    ],
+    ...backOrCancel('HOME').inline_keyboard,
+  ],
+});
+
+const adminDurationKeyboard = (meta: Record<string, string>) => {
+  const payloadBase = { ...meta };
+  const rows = durations.map((d) => [
+    { text: d.label, callback_data: encodeCallbackData('ADMIN_DURATION_PICK', { ...payloadBase, dur: String(d.value) }) },
+  ]);
+  rows.push([{ text: 'Custom (hari)', callback_data: encodeCallbackData('ADMIN_DURATION_CUSTOM', payloadBase) }]);
+  rows.push(...backOrCancel('HOME').inline_keyboard);
+  return { inline_keyboard: rows };
+};
+
+const adminSharingSlotKeyboard = () => ({
+  inline_keyboard: [
+    [
+      { text: '2', callback_data: encodeCallbackData('ADMIN_SHARING_SLOT', { s: '2' }) },
+      { text: '3', callback_data: encodeCallbackData('ADMIN_SHARING_SLOT', { s: '3' }) },
+      { text: '5', callback_data: encodeCallbackData('ADMIN_SHARING_SLOT', { s: '5' }) },
+      { text: '10', callback_data: encodeCallbackData('ADMIN_SHARING_SLOT', { s: '10' }) },
+    ],
+    [{ text: 'Custom', callback_data: encodeCallbackData('ADMIN_SHARING_SLOT_CUSTOM') }],
+    ...backOrCancel('HOME').inline_keyboard,
+  ],
+});
+
+const adminHeadSlotKeyboard = () => ({
+  inline_keyboard: [
+    [
+      { text: '1', callback_data: encodeCallbackData('ADMIN_HEAD_SLOT', { s: '1' }) },
+      { text: '2', callback_data: encodeCallbackData('ADMIN_HEAD_SLOT', { s: '2' }) },
+      { text: '3', callback_data: encodeCallbackData('ADMIN_HEAD_SLOT', { s: '3' }) },
+      { text: '5', callback_data: encodeCallbackData('ADMIN_HEAD_SLOT', { s: '5' }) },
+    ],
+    [{ text: 'Custom', callback_data: encodeCallbackData('ADMIN_HEAD_SLOT_CUSTOM') }],
+    ...backOrCancel('HOME').inline_keyboard,
+  ],
+});
+
+const adminFallbackKeyboard = () => ({
+  inline_keyboard: [
+    [
+      { text: 'STRICT', callback_data: encodeCallbackData('ADMIN_FALLBACK', { f: 'STRICT' }) },
+      {
+        text: 'Fallback PRIVATE→SHARING',
+        callback_data: encodeCallbackData('ADMIN_FALLBACK', { f: 'FALLBACK_PRIVATE_UNUSED_TO_SHARING' }),
+      },
+    ],
+    ...backOrCancel('HOME').inline_keyboard,
+  ],
+});
+
+const adminSummaryText = (buf: any) => {
+  const lines = [
+    `Platform: ${buf.platform || '-'}`,
+    `Seat Mode: ${buf.seat_mode || '-'}`,
+    `Durasi: ${buf.duration_days || '-'} hari`,
+    `Nama: ${buf.product_name || buf.platform || '-'}`,
+    `Max Slot: ${buf.sharing_max_slot || 1}`,
+    `Fallback: ${buf.fallback_policy || 'STRICT'}`,
+    `Fulfillment: ${buf.seat_mode === 'HEAD' ? 'INVITE' : 'LOGIN'}`,
+  ];
+  return lines.join('\n');
 };
 
 // --------- REPORT ----------
@@ -216,8 +310,18 @@ const handlePendingInput = async (message: TelegramMessage, adminUsername: strin
 
   // Clear pending state immediately as the message has been consumed
   // This is only for single-message inputs (NEW_ORDER_BUYER, CANCEL_REASON)
-  // RESTOCK_EXPIRE and RESTOCK_ACCOUNTS manage their own state
-  if (!['RESTOCK_ACCOUNTS', 'RESTOCK_EXPIRE'].includes(pending.action)) {
+  // RESTOCK_EXPIRE/RESTOCK_ACCOUNTS and admin wizard steps manage their own state
+  const stickyPending = [
+    'RESTOCK_ACCOUNTS',
+    'RESTOCK_EXPIRE',
+    'ADMIN_PLATFORM',
+    'ADMIN_ADD_PRODUCT',
+    'ADMIN_DURATION_CUSTOM',
+    'ADMIN_NAME_INPUT',
+    'ADMIN_SHARING_SLOT_CUSTOM',
+    'ADMIN_HEAD_SLOT_CUSTOM',
+  ];
+  if (!stickyPending.includes(pending.action)) {
     pendingInputs.delete(message.chat.id);
   }
 
@@ -332,6 +436,151 @@ Berlaku sampai: ${expire}`,
 ${err?.message || 'Silakan coba lagi atau cek stok akun.'}`
       );
     }
+  }
+
+  const parseLegacyProductInput = (txt: string) => {
+    const parts = txt.split('|').map((p) => p.trim()).filter(Boolean);
+    if (parts.length < 3) return null;
+    const [platformRaw, seatModeRaw, durationRaw, nameRaw, fulfillmentRaw, sharingSlotRaw, fallbackRaw] = parts;
+    const seat_mode = (seatModeRaw || '').toUpperCase() as any;
+    const duration_days = Number(durationRaw);
+    if (!['PRIVATE', 'SHARING', 'HEAD'].includes(seat_mode) || !Number.isFinite(duration_days) || duration_days <= 0) {
+      return null;
+    }
+    const fulfillment = (fulfillmentRaw || (seat_mode === 'HEAD' ? 'INVITE' : 'LOGIN')).toUpperCase();
+    const sharing_max_slot = Number(sharingSlotRaw || (seat_mode === 'SHARING' ? 1 : 0)) || undefined;
+    const fallback_policy = (fallbackRaw || 'STRICT').toUpperCase();
+    return {
+      platform: platformRaw,
+      seat_mode,
+      duration_days,
+      product_name: nameRaw || platformRaw,
+      fulfillment_type: fulfillment,
+      sharing_max_slot,
+      fallback_policy,
+    };
+  };
+
+  if (pending.action === 'ADMIN_PLATFORM') {
+    const text = message.text.trim();
+    const legacy = text.includes('|') ? parseLegacyProductInput(text) : null;
+    if (legacy) {
+      try {
+        await gasClient.addProduct({ ...legacy, mode: legacy.seat_mode, active: true, actor: adminUsername });
+        await telegramClient.sendMessage(
+          message.chat.id,
+          `Produk ditambahkan.\nPlatform: ${legacy.platform}\nSeat Mode: ${legacy.seat_mode}\nDurasi: ${legacy.duration_days} hari`
+        );
+        adminProductBuffers.delete(message.chat.id);
+      } catch (err: any) {
+        console.error('Add product error', err);
+        await telegramClient.sendMessage(
+          message.chat.id,
+          `Gagal menambah produk.\n${err?.message || 'Silakan coba lagi.'}`,
+          { reply_markup: backOrCancel('HOME') }
+        );
+      }
+      return true;
+    }
+
+    const buf = adminProductBuffers.get(message.chat.id) || {};
+    adminProductBuffers.set(message.chat.id, { ...buf, platform: text });
+    await telegramClient.sendMessage(message.chat.id, 'Pilih seat mode:', { reply_markup: adminModeKeyboard() });
+  }
+
+  if (pending.action === 'ADMIN_DURATION_CUSTOM') {
+    const buf = adminProductBuffers.get(message.chat.id) || {};
+    const val = Number(message.text.trim());
+    if (!Number.isFinite(val) || val <= 0) {
+      pendingInputs.set(message.chat.id, pending);
+      await telegramClient.sendMessage(message.chat.id, 'Masukkan jumlah hari (angka > 0).', {
+        reply_markup: backOrCancel('HOME'),
+      });
+      return true;
+    }
+    adminProductBuffers.set(message.chat.id, { ...buf, duration_days: val });
+    pendingInputs.set(message.chat.id, { action: 'ADMIN_NAME_INPUT', meta: {} });
+    await telegramClient.sendMessage(message.chat.id, 'Masukkan nama produk (opsional).', {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: 'Lewati', callback_data: encodeCallbackData('ADMIN_NAME_SKIP') }],
+          ...backOrCancel('HOME').inline_keyboard,
+        ],
+      },
+      force_reply: true,
+    });
+  }
+
+  if (pending.action === 'ADMIN_NAME_INPUT') {
+    const buf = adminProductBuffers.get(message.chat.id) || {};
+    const text = message.text.trim();
+    const name = text.toLowerCase() === 'skip' || text.toLowerCase() === 'lewati' ? buf.platform : text;
+    const updated = { ...buf, product_name: name || buf.platform };
+    adminProductBuffers.set(message.chat.id, updated);
+    if (updated.seat_mode === 'SHARING') {
+      pendingInputs.set(message.chat.id, { action: 'ADMIN_ADD_PRODUCT', meta: {} });
+      await telegramClient.sendMessage(message.chat.id, 'Pilih max slot sharing:', {
+        reply_markup: adminSharingSlotKeyboard(),
+      });
+    } else if (updated.seat_mode === 'HEAD') {
+      pendingInputs.set(message.chat.id, { action: 'ADMIN_ADD_PRODUCT', meta: {} });
+      await telegramClient.sendMessage(message.chat.id, 'Pilih max slot HEAD:', {
+        reply_markup: adminHeadSlotKeyboard(),
+      });
+    } else {
+      // PRIVATE: go summary
+      adminProductBuffers.set(message.chat.id, { ...updated, fallback_policy: 'STRICT' });
+      await telegramClient.sendMessage(message.chat.id, `Ringkasan:\n${adminSummaryText(updated)}`, {
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: 'Konfirmasi', callback_data: encodeCallbackData('ADMIN_PRODUCT_CONFIRM') },
+              { text: 'Batal', callback_data: encodeCallbackData('ADMIN_PRODUCT_CANCEL') },
+            ],
+          ],
+        },
+      });
+    }
+  }
+
+  if (pending.action === 'ADMIN_SHARING_SLOT_CUSTOM') {
+    const buf = adminProductBuffers.get(message.chat.id) || {};
+    const val = Number(message.text.trim());
+    if (!Number.isFinite(val) || val <= 0) {
+      pendingInputs.set(message.chat.id, pending);
+      await telegramClient.sendMessage(message.chat.id, 'Masukkan angka > 0 untuk slot sharing.', {
+        reply_markup: backOrCancel('HOME'),
+      });
+      return true;
+    }
+    adminProductBuffers.set(message.chat.id, { ...buf, sharing_max_slot: val });
+    await telegramClient.sendMessage(message.chat.id, 'Pilih fallback policy:', {
+      reply_markup: adminFallbackKeyboard(),
+    });
+  }
+
+  if (pending.action === 'ADMIN_HEAD_SLOT_CUSTOM') {
+    const buf = adminProductBuffers.get(message.chat.id) || {};
+    const val = Number(message.text.trim());
+    if (!Number.isFinite(val) || val <= 0) {
+      pendingInputs.set(message.chat.id, pending);
+      await telegramClient.sendMessage(message.chat.id, 'Masukkan angka > 0 untuk slot HEAD.', {
+        reply_markup: backOrCancel('HOME'),
+      });
+      return true;
+    }
+    const updated = { ...buf, sharing_max_slot: val };
+    adminProductBuffers.set(message.chat.id, updated);
+    await telegramClient.sendMessage(message.chat.id, `Ringkasan:\n${adminSummaryText(updated)}`, {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: 'Konfirmasi', callback_data: encodeCallbackData('ADMIN_PRODUCT_CONFIRM') },
+            { text: 'Batal', callback_data: encodeCallbackData('ADMIN_PRODUCT_CANCEL') },
+          ],
+        ],
+      },
+    });
   }
 
   if (pending.action === 'CANCEL_REASON') {
@@ -468,9 +717,10 @@ ${err?.message || 'Silakan coba lagi atau cek stok akun.'}`
 
     restockBuffers.set(message.chat.id, { ...buffer, expire_at: expireAt });
     pendingInputs.set(message.chat.id, { action: 'RESTOCK_ACCOUNTS', meta: pending.meta });
+    const prompt = buffer.product.seat_mode === 'HEAD' ? restockPromptHead : restockPrompt;
     await telegramClient.sendMessage(
       message.chat.id,
-      `${expireAt ? `Masa berlaku diset: ${expireAt}` : 'Masa berlaku dikosongkan.'}\n\n${restockPrompt}`,
+      `${expireAt ? `Masa berlaku diset: ${expireAt}` : 'Masa berlaku dikosongkan.'}\n\n${prompt}`,
       { reply_markup: backOrCancel('HOME') }
     );
   }
@@ -486,7 +736,10 @@ ${err?.message || 'Silakan coba lagi atau cek stok akun.'}`
       pendingInputs.delete(message.chat.id);
 
       const uniqueInput = Array.from(new Set(buffer.lines));
-      const existing = await sheetsService.listAccountIdentities(buffer.product.platform);
+      const existing = await sheetsService.listAccountIdentities(
+        buffer.product.platform,
+        buffer.product.seat_mode
+      );
       const deduped = uniqueInput.filter((line) => !existing.has(line));
       const skipped = uniqueInput.length - deduped.length;
       const capped = deduped.slice(0, RESTOCK_MAX_LINES);
@@ -567,6 +820,7 @@ const handleCallback = async (callback: CallbackQuery, adminUsername: string, is
       // State Isolation Fix: Use delete(chatId) instead of global clear()
       pendingInputs.delete(chatId);
       restockBuffers.delete(chatId);
+      adminProductBuffers.delete(chatId);
       await sendHome(chatId, isOwner);
       break;
     case 'ORDER_NEW': {
@@ -908,9 +1162,10 @@ const handleCallback = async (callback: CallbackQuery, adminUsername: string, is
       const expireAt = days > 0 ? expireDateFromDays(days) : '';
       restockBuffers.set(chatId, { ...buffer, expire_at: expireAt });
       pendingInputs.set(chatId, { action: 'RESTOCK_ACCOUNTS', meta: { product_id: buffer.product.product_id } });
+      const prompt = buffer.product.seat_mode === 'HEAD' ? restockPromptHead : restockPrompt;
       await telegramClient.sendMessage(
         chatId,
-        `${expireAt ? `Masa berlaku diset: ${expireAt}` : 'Masa berlaku dikosongkan.'}\n\n${restockPrompt}`,
+        `${expireAt ? `Masa berlaku diset: ${expireAt}` : 'Masa berlaku dikosongkan.'}\n\n${prompt}`,
         { reply_markup: backOrCancel('HOME') }
       );
       break;
@@ -937,7 +1192,10 @@ const handleCallback = async (callback: CallbackQuery, adminUsername: string, is
 
       // Race-Safe Restock Fix: Re-run deduplication check before final write
       const uniqueInput = buffer.lines; // Already deduped against initial check
-      const existing = await sheetsService.listAccountIdentities(buffer.product.platform);
+      const existing = await sheetsService.listAccountIdentities(
+        buffer.product.platform,
+        buffer.product.seat_mode
+      );
       const finalDeduped = uniqueInput.filter((line) => !existing.has(line));
       const newlySkipped = uniqueInput.length - finalDeduped.length;
 
@@ -1015,8 +1273,170 @@ const handleCallback = async (callback: CallbackQuery, adminUsername: string, is
         await telegramClient.sendMessage(chatId, 'Menu ini hanya untuk owner.');
         break;
       }
-      pendingInputs.set(chatId, { action: 'ADMIN_ADD_PRODUCT', meta: {} });
-      await telegramClient.sendMessage(chatId, adminAddProductPrompt, { reply_markup: backOrCancel('HOME') });
+      adminProductBuffers.set(chatId, {});
+      pendingInputs.set(chatId, { action: 'ADMIN_PLATFORM', meta: {} });
+      await telegramClient.sendMessage(
+        chatId,
+        'Masukkan platform produk (contoh: Netflix). Jika mau format lama ketik: platform|mode|durasi|...',
+        { reply_markup: backOrCancel('HOME'), force_reply: true }
+      );
+      break;
+    }
+    case 'ADMIN_MODE_PICK': {
+      const buf = adminProductBuffers.get(chatId);
+      if (!buf) {
+        await telegramClient.sendMessage(chatId, 'Mulai ulang tambah produk dari menu Pengaturan.');
+        break;
+      }
+      const seat_mode = (payload.m || '').toUpperCase() as any;
+      adminProductBuffers.set(chatId, {
+        ...buf,
+        seat_mode,
+        fallback_policy: seat_mode === 'SHARING' ? buf.fallback_policy || 'STRICT' : 'STRICT',
+      });
+      await telegramClient.sendMessage(chatId, 'Pilih durasi produk:', {
+        reply_markup: adminDurationKeyboard({}),
+      });
+      break;
+    }
+    case 'ADMIN_DURATION_PICK': {
+      const buf = adminProductBuffers.get(chatId);
+      if (!buf) {
+        await telegramClient.sendMessage(chatId, 'Mulai ulang tambah produk dari menu Pengaturan.');
+        break;
+      }
+      const dur = Number(payload.dur || payload.d || 0);
+      adminProductBuffers.set(chatId, { ...buf, duration_days: dur });
+      pendingInputs.set(chatId, { action: 'ADMIN_NAME_INPUT', meta: {} });
+      await telegramClient.sendMessage(chatId, 'Masukkan nama produk (opsional).', {
+        force_reply: true,
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: 'Lewati', callback_data: encodeCallbackData('ADMIN_NAME_SKIP') }],
+            ...backOrCancel('HOME').inline_keyboard,
+          ],
+        },
+      });
+      break;
+    }
+    case 'ADMIN_DURATION_CUSTOM': {
+      pendingInputs.set(chatId, { action: 'ADMIN_DURATION_CUSTOM', meta: {} });
+      await telegramClient.sendMessage(chatId, 'Masukkan durasi (hari):', { force_reply: true });
+      break;
+    }
+    case 'ADMIN_NAME_SKIP': {
+      const buf = adminProductBuffers.get(chatId) || {};
+      const updated = { ...buf, product_name: buf.platform };
+      adminProductBuffers.set(chatId, updated);
+      if (updated.seat_mode === 'SHARING') {
+        await telegramClient.sendMessage(chatId, 'Pilih max slot sharing:', {
+          reply_markup: adminSharingSlotKeyboard(),
+        });
+      } else if (updated.seat_mode === 'HEAD') {
+        await telegramClient.sendMessage(chatId, 'Pilih max slot HEAD:', {
+          reply_markup: adminHeadSlotKeyboard(),
+        });
+      } else {
+        adminProductBuffers.set(chatId, { ...updated, fallback_policy: 'STRICT' });
+        await telegramClient.sendMessage(chatId, `Ringkasan:\n${adminSummaryText(updated)}`, {
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: 'Konfirmasi', callback_data: encodeCallbackData('ADMIN_PRODUCT_CONFIRM') },
+                { text: 'Batal', callback_data: encodeCallbackData('ADMIN_PRODUCT_CANCEL') },
+              ],
+            ],
+          },
+        });
+      }
+      break;
+    }
+    case 'ADMIN_SHARING_SLOT': {
+      const buf = adminProductBuffers.get(chatId) || {};
+      const s = Number(payload.s || 0);
+      adminProductBuffers.set(chatId, { ...buf, sharing_max_slot: s });
+      await telegramClient.sendMessage(chatId, 'Pilih fallback policy:', { reply_markup: adminFallbackKeyboard() });
+      break;
+    }
+    case 'ADMIN_SHARING_SLOT_CUSTOM': {
+      pendingInputs.set(chatId, { action: 'ADMIN_SHARING_SLOT_CUSTOM', meta: {} });
+      await telegramClient.sendMessage(chatId, 'Masukkan slot sharing (angka):', { force_reply: true });
+      break;
+    }
+    case 'ADMIN_HEAD_SLOT': {
+      const buf = adminProductBuffers.get(chatId) || {};
+      const s = Number(payload.s || 1);
+      const updated = { ...buf, sharing_max_slot: s };
+      adminProductBuffers.set(chatId, updated);
+      await telegramClient.sendMessage(chatId, `Ringkasan:\n${adminSummaryText(updated)}`, {
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: 'Konfirmasi', callback_data: encodeCallbackData('ADMIN_PRODUCT_CONFIRM') },
+              { text: 'Batal', callback_data: encodeCallbackData('ADMIN_PRODUCT_CANCEL') },
+            ],
+          ],
+        },
+      });
+      break;
+    }
+    case 'ADMIN_HEAD_SLOT_CUSTOM': {
+      pendingInputs.set(chatId, { action: 'ADMIN_HEAD_SLOT_CUSTOM', meta: {} });
+      await telegramClient.sendMessage(chatId, 'Masukkan slot HEAD (angka):', { force_reply: true });
+      break;
+    }
+    case 'ADMIN_FALLBACK': {
+      const buf = adminProductBuffers.get(chatId) || {};
+      const updated = { ...buf, fallback_policy: (payload.f || 'STRICT') as any };
+      adminProductBuffers.set(chatId, updated);
+      await telegramClient.sendMessage(chatId, `Ringkasan:\n${adminSummaryText(updated)}`, {
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: 'Konfirmasi', callback_data: encodeCallbackData('ADMIN_PRODUCT_CONFIRM') },
+              { text: 'Batal', callback_data: encodeCallbackData('ADMIN_PRODUCT_CANCEL') },
+            ],
+          ],
+        },
+      });
+      break;
+    }
+    case 'ADMIN_PRODUCT_CONFIRM': {
+      const buf = adminProductBuffers.get(chatId);
+      if (!buf || !buf.platform || !buf.seat_mode || !buf.duration_days) {
+        await telegramClient.sendMessage(chatId, 'Data produk belum lengkap. Mulai ulang dari menu Pengaturan.');
+        break;
+      }
+      try {
+        await gasClient.addProduct({
+          platform: buf.platform,
+          seat_mode: buf.seat_mode,
+          mode: buf.seat_mode,
+          duration_days: buf.duration_days,
+          product_name: buf.product_name || buf.platform,
+          fulfillment_type: buf.seat_mode === 'HEAD' ? 'INVITE' : 'LOGIN',
+          sharing_max_slot: buf.seat_mode === 'SHARING' || buf.seat_mode === 'HEAD' ? buf.sharing_max_slot || 1 : undefined,
+          fallback_policy: buf.seat_mode === 'SHARING' ? buf.fallback_policy || 'STRICT' : 'STRICT',
+          active: true,
+          actor: adminUsername,
+        });
+        await telegramClient.sendMessage(chatId, 'Produk berhasil ditambahkan.');
+      } catch (err: any) {
+        console.error('Add product confirm error', err);
+        await telegramClient.sendMessage(
+          chatId,
+          `Gagal menambah produk.\n${err?.message || 'Silakan coba lagi.'}`,
+          { reply_markup: backOrCancel('HOME') }
+        );
+      }
+      adminProductBuffers.delete(chatId);
+      pendingInputs.delete(chatId);
+      break;
+    }
+    case 'ADMIN_PRODUCT_CANCEL': {
+      adminProductBuffers.delete(chatId);
+      pendingInputs.delete(chatId);
+      await telegramClient.sendMessage(chatId, 'Tambah produk dibatalkan.');
       break;
     }
     default:

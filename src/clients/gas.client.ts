@@ -882,14 +882,15 @@ class GasClient {
     });
   }
 
-  async listAccountIdentities(platform: string): Promise<Set<string>> {
+  async listAccountIdentities(platform: string, seatMode?: string): Promise<Set<string>> {
     const acc = await this.getTable(SHEET.ACCOUNTS);
     const idxPlatform = acc.headers.indexOf('platform');
     const idxIdentity = acc.headers.indexOf('identity');
     const idxEmail = acc.headers.indexOf('email');
+    const idxMode = acc.headers.indexOf('mode');
     const set = new Set<string>();
     acc.rows.forEach((r) => {
-      if (r[idxPlatform] === platform) {
+      if (r[idxPlatform] === platform && (!seatMode || String(r[idxMode] || '').toUpperCase() === seatMode.toUpperCase())) {
         const iden = (idxIdentity >= 0 ? r[idxIdentity] : '') || r[idxEmail];
         if (iden) set.add(String(iden));
       }

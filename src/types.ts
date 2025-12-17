@@ -126,6 +126,11 @@ export interface PendingInput {
     | 'REPLACE_SEAT'
     | 'CANCEL_REASON'
     | 'ADMIN_ADD_PRODUCT'
+    | 'ADMIN_PLATFORM'
+    | 'ADMIN_DURATION_CUSTOM'
+    | 'ADMIN_NAME_INPUT'
+    | 'ADMIN_SHARING_SLOT_CUSTOM'
+    | 'ADMIN_HEAD_SLOT_CUSTOM'
     | 'RESTOCK_EXPIRE'
     | 'RESTOCK_ACCOUNTS';
   meta: Record<string, string>;

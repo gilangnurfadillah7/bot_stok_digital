@@ -10,8 +10,8 @@ class SheetsService {
     return gasClient.listRecentActiveOrders(limit);
   }
 
-  listAccountIdentities(platform: string) {
-    return gasClient.listAccountIdentities(platform);
+  listAccountIdentities(platform: string, seatMode?: string) {
+    return gasClient.listAccountIdentities(platform, seatMode);
   }
 
   // Used for in-memory deduping in the controller; no-op for real client.

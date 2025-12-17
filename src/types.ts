@@ -12,7 +12,10 @@ export interface Product {
   product_id: string;
   product_name?: string;
   platform: string;
-  mode: 'sharing' | 'private';
+  seat_mode: 'PRIVATE' | 'SHARING' | 'HEAD';
+  fulfillment_type: 'LOGIN' | 'INVITE';
+  sharing_max_slot?: number;
+  fallback_policy?: 'STRICT' | 'FALLBACK_PRIVATE_UNUSED_TO_SHARING';
   duration_days: number;
   active: boolean;
 }
@@ -34,6 +37,10 @@ export type SeatStatus = 'ACTIVE' | 'PENDING_CONFIRM' | 'RESERVED' | 'RELEASED' 
 export interface Seat {
   seat_id: string;
   account_id: string;
+  account_kind?: 'LOGIN' | 'HEAD';
+  account_identity?: string;
+  account_email?: string;
+  seat_mode?: 'PRIVATE' | 'SHARING' | 'HEAD';
   order_id: string;
   buyer_id: string;
   buyer_email: string;
@@ -44,6 +51,10 @@ export interface Seat {
   already_replaced?: boolean;
   already_renewed?: boolean;
   already_skipped?: boolean;
+  invite_email?: string;
+  invite_status?: 'PENDING_INVITE' | 'INVITE_SENT';
+  invite_sent_at?: string;
+  fallback_used?: boolean;
 }
 
 export interface AssignSeatPayload {
@@ -53,6 +64,7 @@ export interface AssignSeatPayload {
   buyer_email: string;
   actor: string;
   duration_days?: number;
+  invite_email?: string;
 }
 
 export interface ReplaceSeatPayload {
@@ -82,11 +94,14 @@ export interface ExpiringSeatSummary {
 
 export interface StockSummary {
   platform: string;
-  mode: 'sharing' | 'private';
+  mode: string;
   total_accounts: number;
   used_slots: number;
   free_slots: number;
   released_slots: number;
+  full_accounts?: number;
+  active_by_label?: Record<string, number>;
+  free_by_label?: Record<string, number>;
 }
 
 export interface SalesSummary {
@@ -105,17 +120,22 @@ export interface TelegramCallbackData {
 export interface PendingInput {
   action:
     | 'NEW_ORDER_BUYER'
+    | 'NEW_ORDER_INVITE_EMAIL'
     | 'ORDER_CHANNEL'
     | 'ORDER_DURATION'
     | 'REPLACE_SEAT'
     | 'CANCEL_REASON'
+    | 'ADMIN_ADD_PRODUCT'
+    | 'RESTOCK_EXPIRE'
     | 'RESTOCK_ACCOUNTS';
   meta: Record<string, string>;
 }
 
 export interface RestockAccountInput {
   platform: string;
-  mode: 'sharing' | 'private';
+  mode: string;
+  account_kind: 'LOGIN' | 'HEAD';
+  identity: string;
   email: string;
   max_slot: number;
   expired_at?: string;

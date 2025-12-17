@@ -2,11 +2,24 @@ import { gasClient } from '../clients/gas.client';
 class ReportService {
   async stockSummary(): Promise<{ text: string; rows: any[] }> {
     const report = await gasClient.reportStock() as any;
+    const row = report[0] || {};
+    const activeLines =
+      row.active_by_label &&
+      Object.entries(row.active_by_label)
+        .map(([k, v]) => `- ${k}: ${v}`)
+        .join('\n');
+    const freeLines =
+      row.free_by_label &&
+      Object.entries(row.free_by_label)
+        .map(([k, v]) => `- ${k}: ${v}`)
+        .join('\n');
     const text =
-      `Aktif: ${report[0]?.used_slots ?? 0}\n` +
-      `Released: ${report[0]?.released_slots ?? 0}\n` +
-      `Akun Penuh: ${report[0]?.full_accounts ?? 'N/A'}\n` +
-      `Slot Tersedia: ${report[0]?.free_slots ?? 0}`;
+      `Aktif: ${row.used_slots ?? 0}\n` +
+      `Released: ${row.released_slots ?? 0}\n` +
+      `Akun Penuh: ${row.full_accounts ?? 0}\n` +
+      `Slot Tersedia: ${row.free_slots ?? 0}` +
+      (activeLines ? `\n\nAktif per produk:\n${activeLines}` : '') +
+      (freeLines ? `\n\nSlot tersedia:\n${freeLines}` : '');
     return { text, rows: [] };
   }
 

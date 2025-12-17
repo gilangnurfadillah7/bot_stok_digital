@@ -132,6 +132,11 @@ class GasClient {
     return o;
   }
 
+  private productLabel(p: Product) {
+    const parts = [p.platform, p.seat_mode || '', p.duration_days ? `${p.duration_days}d` : ''];
+    return parts.filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+  }
+
   async log(action: string, actor: string, refId: string, note?: string) {
     try {
       const { headers } = await this.getTable(SHEET.LOGS);
@@ -165,19 +170,95 @@ class GasClient {
   async listActiveProducts(): Promise<Product[]> {
     const { headers, rows } = await this.getTable(SHEET.PRODUCTS);
     const idxId = headers.indexOf('product_id');
+    const idxName = headers.indexOf('product_name');
     const idxPlatform = headers.indexOf('platform');
-    const idxMode = headers.indexOf('mode');
+    const idxSeatMode = headers.indexOf('seat_mode');
+    const idxMode = headers.indexOf('mode'); // legacy
     const idxDuration = headers.indexOf('duration_days');
     const idxActive = headers.indexOf('active');
+    const idxFulfillment = headers.indexOf('fulfillment_type');
+    const idxSharingSlot = headers.indexOf('sharing_max_slot');
+    const idxFallback = headers.indexOf('fallback_policy');
     return rows
       .filter((r) => this.isActive(r[idxActive]))
-      .map((r) => ({
-        product_id: r[idxId],
-        platform: r[idxPlatform],
-        mode: (r[idxMode] || 'sharing').toLowerCase() as 'sharing' | 'private',
-        duration_days: Number(r[idxDuration] || 0),
-        active: true,
-      }));
+      .map((r) => {
+        const legacyMode = (r[idxMode] || 'SHARING').toString().toUpperCase();
+        const seat_mode = (r[idxSeatMode] || legacyMode || 'SHARING').toString().toUpperCase() as any;
+        const fulfillment =
+          (r[idxFulfillment] || (seat_mode === 'HEAD' ? 'INVITE' : 'LOGIN')).toString().toUpperCase() as any;
+        const sharing_max_slot = Number(r[idxSharingSlot] || 0) || undefined;
+        const fallback_policy = (r[idxFallback] || 'STRICT').toString().toUpperCase() as any;
+        return {
+          product_id: r[idxId],
+          product_name: idxName >= 0 ? r[idxName] || r[idxPlatform] : r[idxPlatform],
+          platform: r[idxPlatform],
+          seat_mode,
+          fulfillment_type: fulfillment,
+          sharing_max_slot,
+          fallback_policy,
+          duration_days: Number(r[idxDuration] || 0),
+          active: true,
+        };
+      });
+  }
+
+  async addProduct(payload: {
+    platform: string;
+    mode: string;
+    duration_days: number;
+    product_name?: string;
+    active?: boolean;
+    actor?: string;
+    seat_mode?: string;
+    fulfillment_type?: string;
+    sharing_max_slot?: number;
+    fallback_policy?: string;
+  }) {
+    const { headers, rows } = await this.getTable(SHEET.PRODUCTS);
+    const idxPlatform = headers.indexOf('platform');
+    const idxMode = headers.indexOf('mode');
+    const idxId = headers.indexOf('product_id');
+    if (idxPlatform === -1 || idxMode === -1 || idxId === -1) {
+      throw new Error('Kolom PRODUCTS tidak lengkap (butuh product_id, platform, mode).');
+    }
+
+    const platform = payload.platform.trim();
+    const mode = (payload.mode || payload.seat_mode || 'SHARING').toString().toUpperCase();
+    const platformLc = platform.toLowerCase();
+    const modeLc = mode.toLowerCase();
+
+    const duplicate = rows.find(
+      (r) =>
+        (r[idxPlatform] || '').toString().toLowerCase() === platformLc &&
+        (r[idxMode] || '').toString().toLowerCase() === modeLc
+    );
+    if (duplicate) {
+      throw new Error('Platform dengan mode tersebut sudah ada di PRODUCTS.');
+    }
+
+    const productId = `PROD-${randomUUID()}`;
+    const productName = payload.product_name || platform;
+    const activeFlag = payload.active ?? true;
+    const seatMode = (payload.seat_mode || mode || 'SHARING').toString().toUpperCase();
+    const fulfillment = (payload.fulfillment_type || (seatMode === 'HEAD' ? 'INVITE' : 'LOGIN')).toString().toUpperCase();
+    const sharingSlot = Number(payload.sharing_max_slot || 0);
+    const fallback = (payload.fallback_policy || 'STRICT').toString().toUpperCase();
+
+    await this.appendRow(SHEET.PRODUCTS, headers, {
+      product_id: productId,
+      platform,
+      product_name: productName,
+      mode,
+      seat_mode: seatMode,
+      fulfillment_type: fulfillment,
+      sharing_max_slot: sharingSlot,
+      fallback_policy: fallback,
+      duration_days: Number(payload.duration_days || 0),
+      active: activeFlag ? 'active' : 'inactive',
+    });
+
+    await this.log('PRODUCT_CREATED', payload.actor || 'bot', productId, `${platform} ${mode}`);
+    return { product_id: productId };
   }
 
   private async findProductById(productId: string): Promise<Product> {
@@ -256,7 +337,10 @@ class GasClient {
       throw new Error('seat assignment allowed only when order status = PENDING_SEND');
     }
 
-    const durationDays = Number(payload.duration_days ?? orderCtx.product.duration_days ?? 0);
+    const product = orderCtx.product as Product;
+    const seatMode = (product.seat_mode || 'SHARING').toString().toUpperCase();
+    const fulfillment = (product.fulfillment_type || (seatMode === 'HEAD' ? 'INVITE' : 'LOGIN')).toString().toUpperCase();
+    const durationDays = Number(payload.duration_days ?? product.duration_days ?? 0);
 
     // existing seat?
     const seatTable = await this.getSeatsTable();
@@ -265,34 +349,56 @@ class GasClient {
     const idxSeatId = seatTable.headers.indexOf('seat_id');
     const idxAcc = seatTable.headers.indexOf('account_id');
     const idxEnd = seatTable.headers.indexOf('end_date');
+    const idxInviteEmail = seatTable.headers.indexOf('invite_email');
+    const idxInviteStatus = seatTable.headers.indexOf('invite_status');
+    const idxSeatMode = seatTable.headers.indexOf('seat_mode');
     const keepStatuses = [SEAT_STATUS.ACTIVE, SEAT_STATUS.PENDING_CONFIRM, SEAT_STATUS.RESERVED];
     const existing = seatTable.rows.find((r) => r[idxOrder] === payload.order_id && keepStatuses.includes(r[idxStatus]));
+
+    const accountsTable = await this.getTable(SHEET.ACCOUNTS);
+    const accIdxId = accountsTable.headers.indexOf('account_id');
+    const accIdxMode = accountsTable.headers.indexOf('mode');
+    const accIdxKind = accountsTable.headers.indexOf('account_kind');
+    const accIdxIdentity = accountsTable.headers.indexOf('identity');
+    const accIdxStatus = accountsTable.headers.indexOf('status');
+    const accIdxMaxSlot = accountsTable.headers.indexOf('max_slot');
+    const accIdxEmail = accountsTable.headers.indexOf('email');
+    const val = (row: any[], idx: number) => (idx >= 0 ? row[idx] : '');
+
     if (existing) {
+      const accRow = accountsTable.rows.find((r) => val(r, accIdxId) === existing[idxAcc]);
+      const accountIdentity = accRow ? val(accRow, accIdxIdentity) || val(accRow, accIdxEmail) || '' : '';
+      const accountEmail = accRow ? val(accRow, accIdxEmail) || '' : '';
       return {
         seat_id: existing[idxSeatId],
         account_id: existing[idxAcc],
+        account_identity: accountIdentity,
+        account_email: accountEmail,
         order_id: payload.order_id,
         buyer_id: payload.buyer_id,
         buyer_email: payload.buyer_email,
         start_date: '',
         end_date: existing[idxEnd],
         status: existing[idxStatus] as any,
+        invite_email: idxInviteEmail >= 0 ? existing[idxInviteEmail] : undefined,
+        invite_status: idxInviteStatus >= 0 ? existing[idxInviteStatus] : undefined,
+        seat_mode: idxSeatMode >= 0 ? existing[idxSeatMode] : undefined,
       };
     }
 
-    const accountsTable = await this.getTable(SHEET.ACCOUNTS);
-    const accIdxId = accountsTable.headers.indexOf('account_id');
-    const accIdxMode = accountsTable.headers.indexOf('mode');
-    const accIdxStatus = accountsTable.headers.indexOf('status');
-    const accIdxMaxSlot = accountsTable.headers.indexOf('max_slot');
-
     const seatIdxReleasedAt = seatTable.headers.indexOf('released_at');
 
-    const isPrivate = String(orderCtx.product.mode).toLowerCase() === 'private';
+    const productMode = seatMode;
+    const isSharing = productMode === 'SHARING';
     const usedSlots = this.countUsedSlots(seatTable.rows, seatTable.headers);
 
-    // reuse released seat FIFO (sharing)
-    if (!isPrivate) {
+    const getMaxSlot = (row: any[]) => {
+      const accSlot = Number(val(row, accIdxMaxSlot) || 0);
+      return accSlot > 0 ? accSlot : Number(product.sharing_max_slot || 1);
+    };
+
+    // reuse released seat FIFO (sharing + login)
+    if (fulfillment === 'LOGIN' && isSharing) {
       const releasedSeats = seatTable.rows
         .map((r, i) => ({ row: r, idx: i }))
         .filter((r) => r.row[idxStatus] === SEAT_STATUS.RELEASED)
@@ -314,43 +420,94 @@ class GasClient {
           start_date: nowIso,
           end_date: endDate,
           released_at: '',
+          seat_mode: 'SHARING',
         });
         await this.log('SEAT_ASSIGNED', payload.actor, payload.order_id, `reuse seat ${pick.row[idxSeatId]}`);
+        const accRow = accountsTable.rows.find((r) => val(r, accIdxId) === pick.row[idxAcc]);
+        const accountEmail = accRow ? val(accRow, accIdxEmail) || '' : '';
+        const accountIdentity = accRow ? val(accRow, accIdxIdentity) || val(accRow, accIdxEmail) || '' : '';
+
         return {
           seat_id: pick.row[idxSeatId],
           account_id: pick.row[idxAcc],
+          account_email: accountEmail,
+          account_identity: accountIdentity,
           order_id: payload.order_id,
           buyer_id: payload.buyer_id,
           buyer_email: payload.buyer_email,
           start_date: nowIso,
           end_date: endDate,
           status: SEAT_STATUS.RESERVED,
+          seat_mode: 'SHARING',
         };
       }
     }
 
-    const candidates = accountsTable.rows
+    // Build candidate list
+    let candidates = accountsTable.rows
       .map((r, i) => ({ row: r, idx: i }))
-      .filter((r) => this.isActive(r.row[accIdxStatus]))
-      .filter((r) => String(r.row[accIdxMode]).toLowerCase() === (isPrivate ? 'private' : 'sharing'))
-      .filter((r) => {
-        const maxSlot = Number(r.row[accIdxMaxSlot] || 1);
-        const used = usedSlots[r.row[accIdxId]] || 0;
-        return isPrivate ? used === 0 : used < maxSlot;
-      })
-      .sort((a, b) => a.idx - b.idx);
+      .filter((r) => this.isActive(val(r.row, accIdxStatus)));
+
+    if (fulfillment === 'INVITE') {
+      candidates = candidates.filter(
+        (r) =>
+          String(val(r.row, accIdxKind) || '').toUpperCase() === 'HEAD' &&
+          String(val(r.row, accIdxMode) || '').toUpperCase() === 'HEAD' &&
+          (usedSlots[val(r.row, accIdxId)] || 0) === 0
+      );
+    } else if (productMode === 'PRIVATE') {
+      candidates = candidates.filter(
+        (r) => String(val(r.row, accIdxMode) || '').toUpperCase() === 'PRIVATE' && (usedSlots[val(r.row, accIdxId)] || 0) === 0
+      );
+    } else if (productMode === 'SHARING') {
+      candidates = candidates.filter((r) => String(val(r.row, accIdxMode) || '').toUpperCase() === 'SHARING');
+      candidates = candidates.filter((r) => {
+        const maxSlot = getMaxSlot(r.row);
+        const used = usedSlots[val(r.row, accIdxId)] || 0;
+        return used < maxSlot;
+      });
+    }
+
+    let fallbackUsed = false;
+
+    // Fallback: promote unused private to sharing
+    if (fulfillment === 'LOGIN' && productMode === 'SHARING' && candidates.length === 0) {
+      const allowFallback = (product.fallback_policy || 'STRICT').toUpperCase() === 'FALLBACK_PRIVATE_UNUSED_TO_SHARING';
+      if (allowFallback) {
+        const privateUnused = accountsTable.rows
+          .map((r, i) => ({ row: r, idx: i }))
+          .filter((r) => this.isActive(val(r.row, accIdxStatus)))
+          .filter((r) => String(val(r.row, accIdxMode) || '').toUpperCase() === 'PRIVATE')
+          .filter((r) => (usedSlots[val(r.row, accIdxId)] || 0) === 0);
+        if (privateUnused.length) {
+          const pick = privateUnused[0];
+          const rowNumber = pick.idx + 2;
+          const maxSlot = Number(product.sharing_max_slot || val(pick.row, accIdxMaxSlot) || 1);
+          await this.updateRow(SHEET.ACCOUNTS, rowNumber, accountsTable.headers, {
+            mode: 'SHARING',
+            max_slot: maxSlot,
+          });
+          candidates = [pick];
+          fallbackUsed = true;
+          await this.log('ACCOUNT_PROMOTED_TO_SHARING', payload.actor, val(pick.row, accIdxId), `order ${payload.order_id}`);
+        }
+      }
+    }
 
     if (!candidates.length) {
       throw new Error('NEED_NEW_ACCOUNT');
     }
 
     const account = candidates[0].row;
-    const accountId = account[accIdxId];
+    const accountId = val(account, accIdxId);
+    const accountKind = (val(account, accIdxKind) || (fulfillment === 'INVITE' ? 'HEAD' : 'LOGIN')).toString().toUpperCase();
+    const accountIdentity = val(account, accIdxIdentity) || val(account, accIdxEmail) || '';
+    const accountEmail = val(account, accIdxEmail) || '';
     const seatId = `SEAT-${randomUUID()}`;
     const nowIso = this.isoNow();
     const endDate = this.addDays(new Date(), durationDays).toISOString();
 
-    await this.appendRow(SHEET.SEATS, seatTable.headers, {
+    const seatPayload: Record<string, any> = {
       seat_id: seatId,
       account_id: accountId,
       order_id: payload.order_id,
@@ -360,18 +517,30 @@ class GasClient {
       end_date: endDate,
       status: SEAT_STATUS.RESERVED as any,
       released_at: '',
-    });
+      seat_mode: productMode,
+      invite_email: payload.invite_email || payload.buyer_email || '',
+      invite_status: fulfillment === 'INVITE' ? 'PENDING_INVITE' : '',
+    };
+
+    await this.appendRow(SHEET.SEATS, seatTable.headers, seatPayload);
 
     await this.log('SEAT_ASSIGNED', payload.actor, payload.order_id, `seat ${seatId} acc ${accountId}`);
     return {
       seat_id: seatId,
       account_id: accountId,
+      account_kind: accountKind as any,
+      account_identity: accountIdentity,
+      account_email: accountEmail,
       order_id: payload.order_id,
       buyer_id: payload.buyer_id,
       buyer_email: payload.buyer_email,
       start_date: nowIso,
       end_date: endDate,
       status: SEAT_STATUS.RESERVED as any,
+      seat_mode: productMode as any,
+      invite_email: seatPayload.invite_email,
+      invite_status: seatPayload.invite_status as any,
+      fallback_used: fallbackUsed,
     };
   }
 
@@ -395,12 +564,18 @@ class GasClient {
       buyer_id: seatObj.buyer_id || payload.buyer_id,
       buyer_email: seatObj.buyer_email || payload.buyer_email,
       actor: payload.actor,
+      invite_email: seatObj.invite_email || payload.buyer_email,
     });
 
-    // activate immediately
-    await this.activateReservedSeat(seat.seat_id);
+    // activate immediately only for login flows
+    if ((seat.seat_mode || '').toString().toUpperCase() !== 'HEAD') {
+      await this.activateReservedSeat(seat.seat_id);
+      await this.log('SEAT_REPLACED', payload.actor, seatObj.order_id, `old ${payload.seat_id} -> ${seat.seat_id}`);
+      return { ...seat, status: SEAT_STATUS.ACTIVE };
+    }
+
     await this.log('SEAT_REPLACED', payload.actor, seatObj.order_id, `old ${payload.seat_id} -> ${seat.seat_id}`);
-    return { ...seat, status: SEAT_STATUS.ACTIVE };
+    return seat;
   }
 
   private async activateReservedSeat(seatId: string) {
@@ -473,8 +648,14 @@ class GasClient {
   async reportStock(): Promise<StockSummary[]> {
     const accounts = await this.getTable(SHEET.ACCOUNTS);
     const seats = await this.getSeatsTable();
+    const products = await this.listActiveProducts();
+    const productLookup = new Map(
+      products.map((p) => [`${p.platform}:${p.seat_mode}`, this.productLabel(p)])
+    );
+
     const idxAccId = accounts.headers.indexOf('account_id');
     const idxMode = accounts.headers.indexOf('mode');
+    const idxPlatform = accounts.headers.indexOf('platform');
     const idxStatus = accounts.headers.indexOf('status');
     const idxMaxSlot = accounts.headers.indexOf('max_slot');
 
@@ -482,33 +663,55 @@ class GasClient {
     const sIdxStatus = seats.headers.indexOf('status');
 
     const usedSlots = this.countUsedSlots(seats.rows, seats.headers);
-    const activeSeats = seats.rows.filter((r) => r[sIdxStatus] === SEAT_STATUS.ACTIVE).length;
     const releasedSeats = seats.rows.filter((r) => r[sIdxStatus] === SEAT_STATUS.RELEASED).length;
 
     let fullAccounts = 0;
     let availableSlots = 0;
+    let activeSlots = 0;
+
+    const activeByLabel: Record<string, number> = {};
+    const freeByLabel: Record<string, number> = {};
+
+    const labelForAccount = (platform: string, mode: string) => {
+      const key = `${platform}:${mode.toUpperCase()}`;
+      return productLookup.get(key) || `${platform} ${mode}`.trim();
+    };
+
     accounts.rows.forEach((r) => {
       if (!this.isActive(r[idxStatus])) return;
+      const accId = r[idxAccId];
+      const platform = r[idxPlatform] || 'UNKNOWN';
+      const mode = (r[idxMode] || '').toString().toUpperCase();
+      const label = labelForAccount(platform, mode);
       const maxSlot = Number(r[idxMaxSlot] || 1);
-      const used = usedSlots[r[idxAccId]] || 0;
+      const used = usedSlots[accId] || 0;
+      const free = Math.max(0, maxSlot - used);
+      activeSlots += used;
       if (used >= maxSlot) fullAccounts += 1;
-      else availableSlots += Math.max(0, maxSlot - used);
+      availableSlots += free;
+      if (used > 0) activeByLabel[label] = (activeByLabel[label] || 0) + used;
+      if (free > 0) freeByLabel[label] = (freeByLabel[label] || 0) + free;
     });
 
     return [
       {
         platform: 'ALL',
-        mode: 'sharing',
+        mode: 'ALL',
         total_accounts: accounts.rows.length,
-        used_slots: activeSeats,
+        used_slots: activeSlots,
         free_slots: availableSlots,
         released_slots: releasedSeats,
-      },
+        full_accounts: fullAccounts,
+        active_by_label: activeByLabel,
+        free_by_label: freeByLabel,
+      } as any,
     ];
   }
 
   async reportSales(): Promise<any> {
     const orders = await this.getTable(SHEET.ORDERS);
+    const products = await this.listActiveProducts();
+    const productMap = new Map(products.map((p) => [p.product_id, p]));
     const idxCreated = orders.headers.indexOf('created_at');
     const idxStatus = orders.headers.indexOf('status');
     const idxProduct = orders.headers.indexOf('product_id');
@@ -523,8 +726,10 @@ class GasClient {
     const group = (rows: any[][], idx: number) => {
       const map: Record<string, number> = {};
       rows.forEach((r) => {
-        const k = r[idx] || 'UNKNOWN';
-        map[k] = (map[k] || 0) + 1;
+        const prodId = r[idx] || 'UNKNOWN';
+        const prod = productMap.get(prodId as string);
+        const label = prod ? this.productLabel(prod) : prodId;
+        map[label] = (map[label] || 0) + 1;
       });
       return Object.keys(map).map((k) => ({ key: k, count: map[k] }));
     };
@@ -548,7 +753,9 @@ class GasClient {
         account_id: accountId,
         platform: acc.platform,
         mode: acc.mode,
-        email: acc.email || '',
+        account_kind: acc.account_kind || 'LOGIN',
+        identity: acc.identity || acc.email || '',
+        email: acc.email || acc.identity || '',
         max_slot: Number(acc.max_slot || 1),
         status: acc.status || 'active',
         expired_at: acc.expired_at || '',
@@ -588,28 +795,55 @@ class GasClient {
 
   async markOrderSent(orderId: string, actor: string) {
     const orderCtx = await this.getOrderContext(orderId);
+    const product = orderCtx.product as Product;
+    const fulfillment = (product.fulfillment_type || (product.seat_mode === 'HEAD' ? 'INVITE' : 'LOGIN'))
+      .toString()
+      .toUpperCase();
     const seatTable = await this.getSeatsTable();
     const idxOrder = seatTable.headers.indexOf('order_id');
     const idxStatus = seatTable.headers.indexOf('status');
     const idxStart = seatTable.headers.indexOf('start_date');
     const idxEnd = seatTable.headers.indexOf('end_date');
+    const idxInviteStatus = seatTable.headers.indexOf('invite_status');
+    const idxInviteSentAt = seatTable.headers.indexOf('invite_sent_at');
+    const idxSeatMode = seatTable.headers.indexOf('seat_mode');
+    let alreadySent = true;
     for (let i = 0; i < seatTable.rows.length; i++) {
       const r = seatTable.rows[i];
-      if (r[idxOrder] === orderId && r[idxStatus] === SEAT_STATUS.RESERVED) {
-        const updates: Record<string, any> = { status: SEAT_STATUS.ACTIVE };
-        if (!r[idxStart]) updates.start_date = this.isoNow();
-        if (!r[idxEnd]) updates.end_date = this.addDays(new Date(), Number(orderCtx.product.duration_days || 0)).toISOString();
-        await this.updateRow(SHEET.SEATS, i + 2, seatTable.headers, updates);
+      if (r[idxOrder] === orderId) {
+        const seatMode = idxSeatMode >= 0 ? (r[idxSeatMode] || '').toString().toUpperCase() : '';
+        const isInvite = fulfillment === 'INVITE' || seatMode === 'HEAD';
+        if (isInvite) {
+          const inviteAlreadySent = idxInviteStatus >= 0 && r[idxInviteStatus] === 'INVITE_SENT';
+          if (inviteAlreadySent) continue;
+          const updates: Record<string, any> = {
+            status: SEAT_STATUS.ACTIVE,
+            invite_status: 'INVITE_SENT',
+            invite_sent_at: this.isoNow(),
+          };
+          if (!r[idxStart]) updates.start_date = this.isoNow();
+          if (!r[idxEnd]) updates.end_date = this.addDays(new Date(), Number(orderCtx.product.duration_days || 0)).toISOString();
+          await this.updateRow(SHEET.SEATS, i + 2, seatTable.headers, updates);
+          alreadySent = false;
+        } else if (r[idxStatus] === SEAT_STATUS.RESERVED) {
+          const updates: Record<string, any> = { status: SEAT_STATUS.ACTIVE };
+          if (!r[idxStart]) updates.start_date = this.isoNow();
+          if (!r[idxEnd]) updates.end_date = this.addDays(new Date(), Number(orderCtx.product.duration_days || 0)).toISOString();
+          await this.updateRow(SHEET.SEATS, i + 2, seatTable.headers, updates);
+          alreadySent = false;
+        }
       }
     }
     await this.updateRow(SHEET.ORDERS, orderCtx.orderRowNumber, orderCtx.orderHeaders, { status: ORDER_STATUS.ACTIVE });
     await this.log('ORDER_SENT', actor, orderId, '');
-    return { success: true };
+    return alreadySent ? { success: true, already_sent: true } : { success: true };
   }
 
   async listRecentActiveOrders(limit = 10) {
     const orders = await this.getTable(SHEET.ORDERS);
     const seats = await this.getSeatsTable();
+    const products = await this.listActiveProducts();
+    const productMap = new Map(products.map((p) => [p.product_id, p]));
     const idxStatus = orders.headers.indexOf('status');
     const idxCreated = orders.headers.indexOf('created_at');
     const idxId = orders.headers.indexOf('order_id');
@@ -633,9 +867,11 @@ class GasClient {
     return filtered.map((r) => {
       const order_id = r[idxId];
       const seatRow = seats.rows.find((s) => s[sIdxOrder] === order_id && s[sIdxStatus] !== SEAT_STATUS.RELEASED);
+      const prod = productMap.get(r[idxProd]);
       return {
         order_id,
         product_id: r[idxProd],
+        product_label: prod ? this.productLabel(prod) : r[idxProd],
         buyer_id: r[idxBuyer],
         buyer_email: r[idxEmail],
         seat_id: seatRow ? seatRow[sIdxSeat] : '',
@@ -649,10 +885,14 @@ class GasClient {
   async listAccountIdentities(platform: string): Promise<Set<string>> {
     const acc = await this.getTable(SHEET.ACCOUNTS);
     const idxPlatform = acc.headers.indexOf('platform');
+    const idxIdentity = acc.headers.indexOf('identity');
     const idxEmail = acc.headers.indexOf('email');
     const set = new Set<string>();
     acc.rows.forEach((r) => {
-      if (r[idxPlatform] === platform && r[idxEmail]) set.add(String(r[idxEmail]));
+      if (r[idxPlatform] === platform) {
+        const iden = (idxIdentity >= 0 ? r[idxIdentity] : '') || r[idxEmail];
+        if (iden) set.add(String(iden));
+      }
     });
     return set;
   }

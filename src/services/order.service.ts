@@ -10,6 +10,7 @@ class OrderService {
     buyer_email: string;
     actor: string;
     duration_days?: number;
+    invite_email?: string;
   }): Promise<{ seat: Seat; orderId: string }> {
     const created = await gasClient.createOrder(input);
     const seat = await gasClient.assignSeat({
@@ -19,6 +20,7 @@ class OrderService {
       buyer_email: input.buyer_email,
       actor: input.actor,
       duration_days: input.duration_days,
+      invite_email: input.invite_email,
     } satisfies AssignSeatPayload);
 
     await gasClient.log('ORDER_ASSIGN', input.actor, created.order_id, `Seat ${seat.seat_id}`);
